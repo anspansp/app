@@ -1,0 +1,107 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: jenkins-pipeline
+spec:
+  containers:
+    - name: maven
+      image: maven:3.8.5-jdk-11
+      command:
+      - cat
+      tty: true
+    - name: docker
+      image: docker:20.10
+      command:
+      - cat
+      tty: true
+      volumeMounts:
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+    - name: sonar-scanner
+      image: sonarsource/sonar-scanner-cli:latest
+      command:
+      - cat
+      tty: true
+    - name: kubectl
+      image: bitnami/kubectl:latest
+      command:
+      - cat
+      tty: true
+  volumes:
+    - name: docker-sock
+      hostPath:
+        path: /var/run/docker.sock
+'''
+        }
+    }
+
+    environment {
+        REGISTRY = 'harbor.mycompany.com/library'
+        IMAGE_TAG = "my-sample-app:${env.BUILD_NUMBER}"
+        K8S_NAMESPACE = 'web-apps'
+        DEPLOYMENT_NAME = 'my-sample-app'
+        GITLAB_REPO = 'http://gitlab.mycompany.com/group/project.git'
+        ARGOCD_APP_NAME = 'my-sample-app'
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                container('maven') {
+                    checkout scm
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                container('sonar-scanner') {
+                    withSonarQubeEnv('SonarQube') {
+                        sh '''
+                        sonar-scanner \
+                        -Dsonar.projectKey=my-sample-app \
+                        -Dsonar.sources=. \
+                        -Dsonar.host.url=http://sonarqube.mycompany.com \
+                        -Dsonar.login=$SONAR_TOKEN
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Build WAR File') {
+            steps {
+                container('maven') {
+                    sh 'mvn clean package -DskipTests'
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                container('docker') {
+                    sh '''
+                    docker build -t $REGISTRY/$IMAGE_TAG .
+                    docker push $REGISTRY/$IMAGE_TAG
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                container('kubectl') {
+                    sh '''
+                    argocd app sync $ARGOCD_APP_NAME
+                    argocd app wait $ARGOCD_APP_NAME --health
+                    '''
+                }
+            }
+        }
+    }
+}
